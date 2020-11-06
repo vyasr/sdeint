@@ -33,6 +33,7 @@ from __future__ import absolute_import
 from .wiener import deltaW, Ikpw, Iwik, Jkpw, Jwik
 import numpy as np
 import numbers
+from numba import jit
 
 
 class Error(Exception):
@@ -116,59 +117,17 @@ def _check_args(f, G, y0, tspan, dW=None, IJ=None):
 
 
 def itoint(f, G, y0, tspan):
-    """ Numerically integrate the Ito equation  dy = f(y,t)dt + G(y,t)dW
-
-    where y is the d-dimensional state vector, f is a vector-valued function,
-    G is an d x m matrix-valued function giving the noise coefficients and
-    dW(t) = (dW_1, dW_2, ... dW_m) is a vector of independent Wiener increments
-
-    Args:
-      f: callable(y,t) returning a numpy array of shape (d,)
-         Vector-valued function to define the deterministic part of the system
-      G: callable(y,t) returning a numpy array of shape (d,m)
-         Matrix-valued function to define the noise coefficients of the system
-      y0: array of shape (d,) giving the initial state vector y(t==0)
-      tspan (array): The sequence of time points for which to solve for y.
-        These must be equally spaced, e.g. np.arange(0,10,0.005)
-        tspan[0] is the intial time corresponding to the initial state y0.
-
-    Returns:
-      y: array, with shape (len(tspan), len(y0))
-         With the initial value y0 in the first row
-
-    Raises:
-      SDEValueError
+    """ Numerically integrate Ito equation  dy = f dt + G dW
     """
     # In future versions we can automatically choose here the most suitable
     # Ito algorithm based on properties of the system and noise.
-    (d, m, f, G, y0, tspan, __, __) = _check_args(f, G, y0, tspan, None, None)
+    # (d, m, f, G, y0, tspan, __, __) = _check_args(f, G, y0, tspan, None, None)
     chosenAlgorithm = itoSRI2
     return chosenAlgorithm(f, G, y0, tspan)
 
 
 def stratint(f, G, y0, tspan):
-    """ Numerically integrate Stratonovich equation dy = f(y,t)dt + G(y,t).dW
-
-    where y is the d-dimensional state vector, f is a vector-valued function,
-    G is an d x m matrix-valued function giving the noise coefficients and
-    dW(t) = (dW_1, dW_2, ... dW_m) is a vector of independent Wiener increments
-
-    Args:
-      f: callable(y,t) returning a numpy array of shape (d,)
-         Vector-valued function to define the deterministic part of the system
-      G: callable(y,t) returning a numpy array of shape (d,m)
-         Matrix-valued function to define the noise coefficients of the system
-      y0: array of shape (d,) giving the initial state vector y(t==0)
-      tspan (array): The sequence of time points for which to solve for y.
-        These must be equally spaced, e.g. np.arange(0,10,0.005)
-        tspan[0] is the intial time corresponding to the initial state y0.
-
-    Returns:
-      y: array, with shape (len(tspan), len(y0))
-         With the initial value y0 in the first row
-
-    Raises:
-      SDEValueError
+    """ Numerically integrate Stratonovich equation  dy = f dt + G \circ dW
     """
     # In future versions we can automatically choose here the most suitable
     # Stratonovich algorithm based on properties of the system and noise.
@@ -177,6 +136,7 @@ def stratint(f, G, y0, tspan):
     return chosenAlgorithm(f, G, y0, tspan)
 
 
+@jit(nopython=True)
 def itoEuler(f, G, y0, tspan, dW=None):
     """Use the Euler-Maruyama algorithm to integrate the Ito equation
     dy = f(y,t)dt + G(y,t) dW(t)
@@ -209,11 +169,17 @@ def itoEuler(f, G, y0, tspan, dW=None):
       G. Maruyama (1955) Continuous Markov processes and stochastic equations
       Kloeden and Platen (1999) Numerical Solution of Differential Equations
     """
-    (d, m, f, G, y0, tspan, dW, __) = _check_args(f, G, y0, tspan, dW, None)
+    # (d, m, f, G, y0, tspan, dW, __) = _check_args(f, G, y0, tspan, dW, None)
+    d = y0.shape[0]
     N = len(tspan)
     h = (tspan[N-1] - tspan[0])/(N - 1)
     # allocate space for result
-    y = np.zeros((N, d), dtype=type(y0[0]))
+    y = np.zeros((N, d), dtype=y0.dtype)
+
+    Gtest = G(y0, tspan[0])
+    # determine number of independent Wiener processes m
+    m = Gtest.shape[1]
+
     if dW is None:
         # pre-generate Wiener increments (for m independent Wiener processes):
         dW = deltaW(N - 1, m, h)
@@ -285,7 +251,7 @@ def stratHeun(f, G, y0, tspan, dW=None):
     return y
 
 
-def itoSRI2(f, G, y0, tspan, Imethod=Ikpw, dW=None, I=None):
+def itoSRI2(f, G, y0, tspan, Imethod=Ikpw):
     """Use the Roessler2010 order 1.0 strong Stochastic Runge-Kutta algorithm
     SRI2 to integrate an Ito equation dy = f(y,t)dt + G(y,t)dW(t)
 
@@ -326,13 +292,13 @@ def itoSRI2(f, G, y0, tspan, Imethod=Ikpw, dW=None, I=None):
         sdeint.Iwik (which is more accurate but uses a lot of memory in the
         current implementation).
 
-      dW: optional array of shape (len(tspan)-1, d). 
+      dW: optional array of shape (len(tspan)-1, d).
       I: optional array of shape (len(tspan)-1, m, m).
         These optional arguments dW and I are for advanced use, if you want to
         use a specific realization of the d independent Wiener processes and
         their multiple integrals at each time step. If not provided, suitable
         values will be generated randomly.
-      
+
     Returns:
       y: array, with shape (len(tspan), len(y0))
          With the initial value y0 in the first row
@@ -344,6 +310,13 @@ def itoSRI2(f, G, y0, tspan, Imethod=Ikpw, dW=None, I=None):
       A. Roessler (2010) Runge-Kutta Methods for the Strong Approximation of
         Solutions of Stochastic Differential Equations
     """
+    Gtest = G(y0, tspan[0])
+    # determine number of independent Wiener processes m
+    m = Gtest.shape[1]
+    N = len(tspan)
+    h = (tspan[N-1] - tspan[0])/(N - 1) # assuming equal time steps
+    dW = deltaW(N - 1, m, h) # shape (N, m)
+    __, I = Imethod(dW, h) # shape (N, m, m)
     return _Roessler2010_SRK2(f, G, y0, tspan, Imethod, dW, I)
 
 
@@ -388,7 +361,7 @@ def stratSRS2(f, G, y0, tspan, Jmethod=Jkpw, dW=None, J=None):
         default) or sdeint.Jwik (which is more accurate but uses a lot of
         memory in the current implementation).
 
-      dW: optional array of shape (len(tspan)-1, d). 
+      dW: optional array of shape (len(tspan)-1, d).
       J: optional array of shape (len(tspan)-1, m, m).
         These optional arguments dW and J are for advanced use, if you want to
         use a specific realization of the d independent Wiener processes and
@@ -409,9 +382,11 @@ def stratSRS2(f, G, y0, tspan, Jmethod=Jkpw, dW=None, J=None):
     return _Roessler2010_SRK2(f, G, y0, tspan, Jmethod, dW, J)
 
 
-def _Roessler2010_SRK2(f, G, y0, tspan, IJmethod, dW=None, IJ=None):
+
+@jit(nopython=True)
+def _Roessler2010_SRK2(f, G, y0, tspan, IJmethod, dW, IJ):
     """Implements the Roessler2010 order 1.0 strong Stochastic Runge-Kutta
-    algorithms SRI2 (for Ito equations) and SRS2 (for Stratonovich equations). 
+    algorithms SRI2 (for Ito equations) and SRS2 (for Stratonovich equations).
 
     Algorithms SRI2 and SRS2 are almost identical and have the same extended
     Butcher tableaus. The difference is that Ito repeateded integrals I_ij are
@@ -420,7 +395,7 @@ def _Roessler2010_SRK2(f, G, y0, tspan, IJmethod, dW=None, IJ=None):
 
     Args:
       f: A function f(y, t) returning an array of shape (d,)
-      G: Either a function G(y, t) that returns an array of shape (d, m), 
+      G: Either a function G(y, t) that returns an array of shape (d, m),
          or a list of m functions g(y, t) each returning an array shape (d,).
       y0: array of shape (d,) giving the initial state
       tspan (array): Sequence of equally spaced time points
@@ -428,7 +403,7 @@ def _Roessler2010_SRK2(f, G, y0, tspan, IJmethod, dW=None, IJ=None):
         integrals. N.B. for an Ito equation, must use an Ito version here
         (either Ikpw or Iwik). For a Stratonovich equation, must use a
         Stratonovich version here (Jkpw or Jwik).
-      dW: optional array of shape (len(tspan)-1, d). 
+      dW: optional array of shape (len(tspan)-1, d).
       IJ: optional array of shape (len(tspan)-1, m, m).
         Optional arguments dW and IJ are for advanced use, if you want to
         use a specific realization of the d independent Wiener processes and
@@ -445,21 +420,27 @@ def _Roessler2010_SRK2(f, G, y0, tspan, IJmethod, dW=None, IJ=None):
       A. Roessler (2010) Runge-Kutta Methods for the Strong Approximation of
         Solutions of Stochastic Differential Equations
     """
-    (d, m, f, G, y0, tspan, dW, IJ) = _check_args(f, G, y0, tspan, dW, IJ)
-    have_separate_g = (not callable(G)) # if G is given as m separate functions
+    # (d, m, f, G, y0, tspan, dW, IJ) = _check_args(f, G, y0, tspan, dW, IJ)
+    d = y0.shape[0]
+    Gtest = G(y0, tspan[0])
+    # determine number of independent Wiener processes m
+    m = Gtest.shape[1]
+    # have_separate_g = (not callable(G)) # if G is given as m separate functions
+    have_separate_g = False
     N = len(tspan)
     h = (tspan[N-1] - tspan[0])/(N - 1) # assuming equal time steps
-    if dW is None:
-        # pre-generate Wiener increments (for m independent Wiener processes):
-        dW = deltaW(N - 1, m, h) # shape (N, m)
-    if IJ is None: 
-        # pre-generate repeated stochastic integrals for each time step.
-        # Must give I_ij for the Ito case or J_ij for the Stratonovich case:
-        __, I = IJmethod(dW, h) # shape (N, m, m)
-    else:
-        I = IJ
+    # if dW is None:
+    #     # pre-generate Wiener increments (for m independent Wiener processes):
+    #     dW = deltaW(N - 1, m, h) # shape (N, m)
+    # if IJ is None:
+    #     # pre-generate repeated stochastic integrals for each time step.
+    #     # Must give I_ij for the Ito case or J_ij for the Stratonovich case:
+    #     __, I = IJmethod(dW, h) # shape (N, m, m)
+    # else:
+    #     I = IJ
+    I = IJ
     # allocate space for result
-    y = np.zeros((N, d), dtype=type(y0[0]))
+    y = np.zeros((N, d), dtype=y0.dtype)
     y[0] = y0;
     Gn = np.zeros((d, m), dtype=y.dtype)
     for n in range(0, N-1):
@@ -510,7 +491,7 @@ def stratKP2iS(f, G, y0, tspan, Jmethod=Jkpw, gam=None, al1=None, al2=None,
     Args:
       f: A function f(y, t) returning an array of shape (d,) to define the
         deterministic part of the system
-      G: A function G(y, t) returning an array of shape (d, m) to define the 
+      G: A function G(y, t) returning an array of shape (d, m) to define the
         noise coefficients of the system
       y0: array of shape (d,) giving the initial state
       tspan (array): Sequence of equally spaced time points
@@ -525,13 +506,13 @@ def stratKP2iS(f, G, y0, tspan, Jmethod=Jkpw, gam=None, al1=None, al2=None,
         This is the relative tolerance used when solving the implicit equation
         for Y_{n+1} at each step. It does not mean that the overall sample path
         approximation has this relative precision.
-      dW: optional array of shape (len(tspan)-1, d). 
+      dW: optional array of shape (len(tspan)-1, d).
       J: optional array of shape (len(tspan)-1, m, m).
         These optional arguments dW and J are for advanced use, if you want to
         use a specific realization of the d independent Wiener processes and
         their multiple integrals at each time step. If not provided, suitable
         values will be generated randomly.
- 
+
     Returns:
       y: array, with shape (len(tspan), len(y0))
 
@@ -539,7 +520,7 @@ def stratKP2iS(f, G, y0, tspan, Jmethod=Jkpw, gam=None, al1=None, al2=None,
       SDEValueError, RuntimeError
 
     See also:
-      P. Kloeden and E. Platen (1999) Numerical Solution of Stochastic 
+      P. Kloeden and E. Platen (1999) Numerical Solution of Stochastic
         Differential Equations, revised and updated 3rd printing.
     """
     try:
@@ -562,7 +543,7 @@ def stratKP2iS(f, G, y0, tspan, Jmethod=Jkpw, gam=None, al1=None, al2=None,
     if dW is None:
         # pre-generate Wiener increments (for m independent Wiener processes):
         dW = deltaW(N - 1, m, h) # shape (N, m)
-    if J is None: 
+    if J is None:
         # pre-generate repeated Stratonovich integrals for each time step
         __, J = Jmethod(dW, h) # shape (N, m, m)
     # allocate space for result

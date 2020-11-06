@@ -39,29 +39,42 @@ else:
     from ._broadcast import broadcast_to
 
 
+from numba import jit
+
+@jit(nopython=True)
 def deltaW(N, m, h):
     """Generate sequence of Wiener increments for m independent Wiener
-    processes W_j(t) j=0..m-1 for each of N time intervals of length h.    
+    processes W_j(t) j=0..m-1 for each of N time intervals of length h.
 
     Returns:
       dW (array of shape (N, m)): The [n, j] element has the value
-      W_j((n+1)*h) - W_j(n*h) 
+      W_j((n+1)*h) - W_j(n*h)
     """
     return np.random.normal(0.0, np.sqrt(h), (N, m))
 
 
+@jit(nopython=True)
 def _t(a):
     """transpose the last two axes of a three axis array"""
     return a.transpose((0, 2, 1))
 
 
+@jit(nopython=True)
 def _dot(a, b):
     """ for rank 3 arrays a and b, return \sum_k a_ij^k . b_ik^l (no sum on i)
     i.e. This is just normal matrix multiplication at each point on first axis
     """
-    return np.einsum('ijk,ikl->ijl', a, b)
+    product = np.zeros((a.shape[0], a.shape[1], b.shape[2]))
+    for i in range(a.shape[0]):
+        for j in range(a.shape[1]):
+            for k in range(a.shape[2]):
+                for l in range(b.shape[2]):
+                    product[i, j, l] += a[i, j, k] * b[i, k, l]
+    return product
+    # return np.einsum('ijk,ikl->ijl', a, b)
 
 
+@jit(nopython=True)
 def _Aterm(N, h, m, k, dW):
     """kth term in the sum of Wiktorsson2001 equation (2.2)"""
     sqrt2h = np.sqrt(2.0/h)
@@ -72,6 +85,7 @@ def _Aterm(N, h, m, k, dW):
     return (term1 - term2)/k
 
 
+@jit(nopython=True)
 def Ikpw(dW, h, n=5):
     """matrix I approximating repeated Ito integrals for each of N time
     intervals, based on the method of Kloeden, Platen and Wright (1992).
@@ -85,15 +99,16 @@ def Ikpw(dW, h, n=5):
     Returns:
       (A, I) where
         A: array of shape (N, m, m) giving the Levy areas that were used.
-        I: array of shape (N, m, m) giving an m x m matrix of repeated Ito 
+        I: array of shape (N, m, m) giving an m x m matrix of repeated Ito
         integral values for each of the N time intervals.
     """
     N = dW.shape[0]
     m = dW.shape[1]
-    if dW.ndim < 3:
-        dW = dW.reshape((N, -1, 1)) # change to array of shape (N, m, 1)
-    if dW.shape[2] != 1 or dW.ndim > 3:
-        raise(ValueError)
+    # if dW.ndim < 3:
+    #     dW = dW.reshape((N, -1, 1)) # change to array of shape (N, m, 1)
+    dW = dW.reshape((N, -1, 1)) # change to array of shape (N, m, 1)
+    # if dW.shape[2] != 1 or dW.ndim > 3:
+    #     raise(ValueError)
     A = _Aterm(N, h, m, 1, dW)
     for k in range(2, n+1):
         A += _Aterm(N, h, m, k, dW)
@@ -186,7 +201,7 @@ def _P(m):
 
 def _K(m):
     """ matrix K_m from Wiktorsson2001 """
-    M = m*(m - 1)//2
+    M = m*(m - 1)/2
     K = np.zeros((M, m**2), dtype=np.int64)
     row = 0
     for j in range(1, m):
@@ -199,7 +214,7 @@ def _K(m):
 
 def _AtildeTerm(N, h, m, k, dW, Km0, Pm0):
     """kth term in the sum for Atilde (Wiktorsson2001 p481, 1st eqn)"""
-    M = m*(m-1)//2
+    M = m*(m-1)/2
     Xk = np.random.normal(0.0, 1.0, (N, m, 1))
     Yk = np.random.normal(0.0, 1.0, (N, m, 1))
     factor1 = np.dot(Km0, Pm0 - np.eye(m**2))
@@ -210,7 +225,7 @@ def _AtildeTerm(N, h, m, k, dW, Km0, Pm0):
 
 def _sigmainf(N, h, m, dW, Km0, Pm0):
     """Asymptotic covariance matrix \Sigma_\infty  Wiktorsson2001 eqn (4.5)"""
-    M = m*(m-1)//2
+    M = m*(m-1)/2
     Im = broadcast_to(np.eye(m), (N, m, m))
     IM = broadcast_to(np.eye(M), (N, M, M))
     Ims0 = np.eye(m**2)
@@ -237,7 +252,7 @@ def Iwik(dW, h, n=5):
 
     Returns:
       (Atilde, I) where
-        Atilde: array of shape (N,m(m-1)//2,1) giving the area integrals used.
+        Atilde: array of shape (N, m(m-1)/2, 1) giving the area integrals used.
         I: array of shape (N, m, m) giving an m x m matrix of repeated Ito
         integral values for each of the N time intervals.
     """
@@ -251,7 +266,7 @@ def Iwik(dW, h, n=5):
         return (np.zeros((N, 1, 1)), (dW*dW - h)/2.0)
     Pm0 = _P(m)
     Km0 = _K(m)
-    M = m*(m-1)//2
+    M = m*(m-1)/2
     Atilde_n = _AtildeTerm(N, h, m, 1, dW, Km0, Pm0)
     for k in range(2, n+1):
         Atilde_n += _AtildeTerm(N, h, m, k, dW, Km0, Pm0)
@@ -285,7 +300,7 @@ def Jwik(dW, h, n=5):
 
     Returns:
       (Atilde, J) where
-        Atilde: array of shape (N,m(m-1)//2,1) giving the area integrals used.
+        Atilde: array of shape (N, m(m-1)/2, 1) giving the area integrals used.
         J: array of shape (N, m, m) giving an m x m matrix of repeated
         Stratonovich integral values for each of the N time intervals.
     """
